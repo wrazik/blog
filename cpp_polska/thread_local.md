@@ -3,51 +3,40 @@ C++11 wprowadził wiele funkcjonalności, bez których nie wyobrażamy sobie pis
 Jednym z takich dodatków jest słowo kluczowe **thread\_local**.
 
 # Problem
-Ostatnio natrafiłem w aplikacji wielowątkowej na problem z zapisem do bazy danych przy dużym obciążeniu. Fragment kodu odpowiedzialny za komunikację 
-z bazą danych okazał się być nieprzystosowany do pracy na wielu wątkach. Bazą danych było mongo, do połączenia używaliśmy bilbioteki mongocxx. Poniżej
-przykładowy fragment kodu: 
+Chcemy napisać funkcję, która będzie odpowiedzialna za generację liczb pseudolosowych z danego zakresu.
+Najprostsza implementacja może wyglądać następująco:
 ```cpp
-class MongoCoordinator {
-  public:
-    void WriteData(/* some data*/) {
-      auto collection = client_[collection_name];
-      // ... process
-    }
-
-  private: 
-    static mongocxx::instance instance_;
-    static mongocxx::client client_;
+int DiceInt(int min, int max) {
+  std::mt19937 engine;
+  std::uniform_int_distribution<std::mt19937::result_type> dist(min,max);
+  return dist(engine);
 }
-
-mongocxx::instance MongoCoordinator::instance_ = {}
-mongocxx::client MongoCoordinator::client_ = {}
-
-// ...
-// later in the code
-
-std::thread th1([]{
-  MongoCoordinator mongo;
-  mongo.WriteData(/* some data */);
-});
-
-std::thread th2([]{
-  MongoCoordinator mongo;
-  mongo.WriteData(/* some data */);
-});
-th1.join();
-th2.join();
 ```
+Załóżmy, że funkcja ta jest wąskim gardłem naszej aplikacji. Pierwszą rzeczą, którą można zoptymalizować, jest tworzenie silnika. 
+Tworząc go za każdym razem, na pewno tracimy sporo cennych cykli procesora. Zakładając, że funkcja jest wywoływana w wielu miejscach
+sporej aplikacji, przekazywanie wcześniej utworzonego silnika jako referencji byłoby zbyt czasochołonne. Spróbujmy więc zadeklarować
+zmienną `engine` jako static: 
+```cpp
+int DiceInt(int min, int max) {
+  static std::mt19937 engine;
+  std::uniform_int_distribution<std::mt19937::result_type> dist(min,max);
+  return dist(engine);
+}
+```
+Warto teraz dokonać porównania i sprawdzić, jak dużo szybsza jest druga wersja. 
+Posłużymy się microbenchmarkiem, w przykładzie wykorzystamy google benchmark. 
+Wynik okazał się zaskakujący: 
+![http://quick-bench.com/WZI08aApkekn67VYYf5Ie5Nl0Wo](thread_local/bench1.png "Normal vs static")
 
-Założenia powyższego fragmentu kodu: 
-* tworzenie nowego klienta jest bardzo kosztowne
-* obsługa błędów została pominięta
-* musi istnieć dokładnie jedna instancja klasy instance\_ (wymaganie biblioteki mongocxx)
+Tworzenie nowego silnika za każdym razem jest ponad 6000 razy wolniejsze\*! [Sprawdźcie sami!](http://quick-bench.com/WZI08aApkekn67VYYf5Ie5Nl0Wo)
 
-Już na pierwszy rzut oka widać, że brakuje synchronizacji dla zmiennej client\_. Można oczywiście zabezpieczyć dostęp do niej mutexem, 
-ale czy na pewno będzie to najlepsze rozwiązanie? Zanim rozwiążemy problem, przypomnijmy sobie, jakie rodzaje storage duration mamy w języku C++.
+A co jeśli nasza aplikacja działa w świecie wielowątkowym? Zmienna statyczna jest 
+w takim wypadku współdzielona pomiędzy wszystkimi wątkami, konieczny więc
+jest mechanizm synchronizacyjny. Chyba, że istnieje lepszy sposób... 
+Zanim do niego przejdziemy, przypomnijmy sobie kilka teoretycznych
+rzeczy, znajdujących się w języku C++.
 
 ## Storage duration
-
 Storage duration definiuje nam, jaki jest "czas przechowywania" danego obiektu, to znaczy w którym momencie zostanie stworzony i zniszczony.
 Stwórzmy sobie najpierw pomocniczą strukturę, która wypisze na standardowe wyjście swój moment tworzenia i niszczenia:
 ```cpp
@@ -213,22 +202,37 @@ extern thread_local Foo foo; //defined in other compilation unit;
 
 Linkowanie zewnętrzne (ang. external linkage) oznacza, że zmienna foo2 jest zdefiniowana w innej jednostce kompilacji.
 
-## Poprawienie kodu
+## Naprawa początkowego kodu
 
-Jak można się domyślić, aby poprawić kod, który umieszczony jest we wstępie, wystarczy zadeklarować zmienną jako thread\_local:
+Jak się pewnie domyślaliście po przeczytaniu tytułu posta, rozwiązaniem naszego problemu
+będzie zadeklarowanie silnika jako zmienną typu thread\_local. Nie musimy dodawać 
+kolejnych mutexów, nie musimy martwić się o synchronizację, wystarczy dodanie jednego
+słowa kluczowego i mamy szybkie, bezpieczne rozwiązanie naszego problemu. 
 ```cpp
-class MongoCoordinator {
-// ... 
-  static thread_local mongocxx::client client_;
+int DiceInt(int min, int max) {
+  thread_local std::mt19937 engine;
+  std::uniform_int_distribution<std::mt19937::result_type> dist(min,max);
+  return dist(engine);
 }
-// ... 
-thread_local mongocxx::client MongoCoordinator::client_ = {}
 ```
+Żeby nie rzucać słów na wiatr, porównajmy implementację z mutexami do implementacji
+ze zmienną o `thread storage duration`.
+![http://quick-bench.com/Iko9jFTD4dkJgqf1SIa_VAoSnGo](thread_local/bench2.png "Mtx vs thread_local")
 
-Zamiast dodawać zbędne mutexy wystarczyło zmienić klienta do bazy danych na membera typu thread\_local - i rozwiązało to problemy synchronizacyjne. 
-
+Wersja z thread\_local okazała się być prawie 80 razy szybsza!
+[Tutaj](http://quick-bench.com/Iko9jFTD4dkJgqf1SIa_VAoSnGo) możecie zobaczyć kod źródłowy testów.
 ## Podsumowanie
 
 Język C++ posiada bardzo wiele funkcjonalności, których na co dzień się nie używa. Jedną z nich jest thread\_local, które może być bardzo przydatne 
-w aplikacjach wielowątkowych. Zamiast synchronizować zmienną statyczną, możemy użyć zmiennej thread\_local i żadna synchronizacja nie będzie potrzebna. 
+w aplikacjach wielowątkowych. Zamiast synchronizować zmienną statyczną, możemy użyć zmiennej thread\_local. Kod źródłowy jest prostszy i wygląda dużo
+ładniej. Jest też spora szansa, że będzie szybszy niż kod obarczony zbędną synchronizacja mutexami. 
 
+Serdeczne podziękowania dla wszystkich, którzy sprawdzili posta przed publikacją:
+- Krzysztofa Rześniowieckiego
+- Jakuba Piskorza
+- Piotra Jelonkiewicza
+- Rafała Chabowskiego
+
+Jesteście najlepsi!
+
+\* - korzystaliśmy z kompilatora gcc w wersji 7.3 z flagą O3, testy były robione na stronie quick-bench.com
