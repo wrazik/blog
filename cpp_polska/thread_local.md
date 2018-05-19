@@ -6,36 +6,37 @@ Jednym z takich dodatków jest słowo kluczowe **thread\_local**.
 Ostatnio natrafiłem w aplikacji wielowątkowej na problem z zapisem do bazy danych przy dużym obciążeniu. Fragment kodu odpowiedzialny za komunikację 
 z bazą danych okazał się być nieprzystosowany do pracy na wielu wątkach. Bazą danych było mongo, do połączenia używaliśmy bilbioteki mongocxx. Poniżej
 przykładowy fragment kodu: 
-
-    class MongoCoordinator {
-      public:
-        void WriteData(/* some data*/) {
-          auto collection = client_[collection_name];
-          // ... process
-        }
-
-      private: 
-        static mongocxx::instance instance_;
-        static mongocxx::client client_;
+```cpp
+class MongoCoordinator {
+  public:
+    void WriteData(/* some data*/) {
+      auto collection = client_[collection_name];
+      // ... process
     }
 
-    mongocxx::instance MongoCoordinator::instance_ = {}
-    mongocxx::client MongoCoordinator::client_ = {}
-    
-    // ...
-    // later in the code
+  private: 
+    static mongocxx::instance instance_;
+    static mongocxx::client client_;
+}
 
-    std::thread th1([]{
-      MongoCoordinator mongo;
-      mongo.WriteData(/* some data */);
-    });
+mongocxx::instance MongoCoordinator::instance_ = {}
+mongocxx::client MongoCoordinator::client_ = {}
 
-    std::thread th2([]{
-      MongoCoordinator mongo;
-      mongo.WriteData(/* some data */);
-    });
-    th1.join();
-    th2.join();
+// ...
+// later in the code
+
+std::thread th1([]{
+  MongoCoordinator mongo;
+  mongo.WriteData(/* some data */);
+});
+
+std::thread th2([]{
+  MongoCoordinator mongo;
+  mongo.WriteData(/* some data */);
+});
+th1.join();
+th2.join();
+```
 
 Założenia powyższego fragmentu kodu: 
 * tworzenie nowego klienta jest bardzo kosztowne
@@ -47,30 +48,32 @@ ale czy na pewno będzie to najlepsze rozwiązanie? Zanim rozwiążemy problem, 
 
 ## Storage duration
 
-Storage duration definiuje nam, jak jest "czas przechowywania" danego obiektu, to znaczy w którym momencie zostanie stworzony i zniszczony.
+Storage duration definiuje nam, jaki jest "czas przechowywania" danego obiektu, to znaczy w którym momencie zostanie stworzony i zniszczony.
 Stwórzmy sobie najpierw pomocniczą strukturę, która wypisze na standardowe wyjście swój moment tworzenia i niszczenia:
+```cpp
+#include <iostream>
 
-    #include <iostream>
-
-    struct Foo {
-      Foo(int i) : i_(i) { std::cout <<  "Foo(" << i_ << ")\n"; }
-      ~Foo()             { std::cout << "~Foo(" << i_ << ")\n"; }
-      int i_;
-    };
+struct Foo {
+  Foo(int i) : i_(i) { std::cout <<  "Foo(" << i_ << ")\n"; }
+  ~Foo()             { std::cout << "~Foo(" << i_ << ")\n"; }
+  int i_;
+};
+```
 
 Mając taką strukturę, możemy przetestować w jakiej kolejności wywoływane są konstruktory i destruktory. 
 
 ### Automatic
 
-Dla normalnie zadeklarowanych zmiennych, kolejność tworzenia i niszczenia jest taka, jaką byśmy oczekiwali:
-
-    int main() {
-      Foo foo1(1); 
-      {
-        Foo foo2(2);
-      }
-      return 0;
-    }
+Dla normalnie zadeklarowanych zmiennych, kolejność tworzenia i niszczenia jest taka, jakiej byśmy oczekiwali:
+```cpp
+int main() {
+  Foo foo1(1); 
+  {
+    Foo foo2(2);
+  }
+  return 0;
+}
+```
 
 Na ekranie pojawi się :
 
@@ -85,19 +88,20 @@ zniszczona. Na końcu, niszczy się foo1. Taki storage duration - od momentu zad
 
 ### Static
 
-Kolejnym typem storage duration jest static storage duration.  Oznacza on, że zmienna zostanie stworzona w kolejności zadeklarowania , a usunięta na końcu 
+Kolejnym typem storage duration jest `static storage duration`.  Oznacza on, że zmienna zostanie stworzona w kolejności zadeklarowania, a usunięta na końcu 
 działania programu. Posiadają go zmienne zadeklarowane jako static, zmienne globalne oraz zmienne zadeklarowane jako extern.
 Poniżej ilustracja:
+```cpp
+Foo foo3(3);
 
-    Foo foo3(3);
-
-    int main() {
-      Foo foo1(1); 
-      {
-        static Foo foo2(2);
-      }
-      return 0;
-    }
+int main() {
+  Foo foo1(1); 
+  {
+    static Foo foo2(2);
+  }
+  return 0;
+}
+```
 
 Po uruchomieniu, na ekranie zobaczymy:
 
@@ -112,29 +116,31 @@ Zmienne zostały stworzone w kolejności deklaracji. Jeśli chodzi o niszczenie 
 zmiennej foo2 a potem zmiennej foo3. 
 
 Warto znać niuans dotyczący inicjalizacji zmiennych ze static storage duration. Rozważmy taki przykład: 
+```cpp
+extern int i;
+int j = i;
+int i = 2;
 
-    extern int i;
-    int j = i;
-    int i = 2;
-
-    int main() {
-      return j;
-    }
+int main() {
+  return j;
+}
+```
 
 W powyższym przykładzie, mogłoby się wydawać że zmienna `j` zostanie zainicjalizowana wartością 0. Jednak cały program zwraca wartość 2. 
 Spróbujmy napisać więc kontrprzykład, gdzie zmienna zostanie zainicjalizowana zerem: 
+```cpp
+int foo() {
+  return 2;
+}
 
-    int foo() {
-      return 2;
-    }
+extern int i;
+int j = i;
+int i = foo(); // = 2 before
 
-    extern int i;
-    int j = i;
-    int i = foo(); // = 2 before
-
-    int main() {
-      return j;
-    }
+int main() {
+  return j;
+}
+```
 
 Po tej niewielkiej zmianie, program zwraca wartość zero. Dlaczego tak się dzieje?
 Zerknijmy do standardu C++, dokładniej do [tego](http://eel.is/c++draft/basic.start.static#2) paragrafu:
@@ -147,37 +153,39 @@ W drugim przypadku - obie inicjalizacje są dynamiczne, więc j będzie miało w
 ### Thread
 Najmniej znanym typem storage duration, jest ten, który deklarujemy przy użyciu tytułowego słowa kluczowego **thread\_local**. 
 Aby zrozumieć różnicę pomiędzy static a thread\_local, posłużmy się przykładem.
+```cpp
+void foo(int i) {
+  static Foo foo(i);
+}
 
-    void foo(int i) {
-      static Foo foo(i);
-    }
-
-    int main() {
-      foo(0);
-      std::thread th1(foo, 1);
-      std::thread th2(foo, 2);
-      th1.join();
-      th2.join();
-    }
+int main() {
+  foo(0);
+  std::thread th1(foo, 1);
+  std::thread th2(foo, 2);
+  th1.join();
+  th2.join();
+}
+```
 
 Na ekranie pojawi się:
 
     Foo(0)
     ~Foo(0)
     
-Widzimy, że zostanie stworzona dokładnie jedna instancja klasy Foo. Zamieńmy teraz zmienną ze static na thread\_local:
+Widzimy, że zostanie stworzona dokładnie jedna instancja struktury Foo. Zamieńmy teraz zmienną ze static na thread\_local:
+```cpp
+void foo(int i) {
+  thread_local Foo foo(i);
+}
 
-    void foo(int i) {
-      thread_local Foo foo(i);
-    }
-
-    int main() {
-      foo(0);
-      std::thread th1(foo, 1);
-      std::thread th2(foo, 2);
-      th1.join();
-      th2.join();
-    }
+int main() {
+  foo(0);
+  std::thread th1(foo, 1);
+  std::thread th2(foo, 2);
+  th1.join();
+  th2.join();
+}
+```
 
 Wyjście programu może wyglądać następująco:
 
@@ -188,34 +196,39 @@ Wyjście programu może wyglądać następująco:
     ~Foo(2)
     ~Foo(0)
 
-Jak widzimy, zostały stworzone dokładnie 3 instancję klasy Foo - dla wątku głównego, th1 oraz th2.
+Jak widzimy, zostały stworzone dokładnie 3 instancję struktury Foo - dla wątku głównego, th1 oraz th2.
 
 Oprócz tego, że zmienna może być thread\_local, nic nie stoi na przeszkodzie, aby zadeklarować zmienną jako static thread local:
 
-    static thread_local Foo foo(0);
+```cpp
+static thread_local Foo foo(0);
+```
 
 W tym kontekście, słowo static odnosi się do typu linkowania i oznacza, że zmienna ma linkowanie wewnętrzne (ang. internal linkage). 
 Słowo static jest tutaj zbędne, gdyż taki rodzaj linkowania jest domyślny. Alternatywą jest linkowanie zewnętrzne ze słowem kluczowym extern:
 
-    extern thread_local Foo foo; //defined in other compilation unit;
+```cpp
+extern thread_local Foo foo; //defined in other compilation unit;
+```
 
 Linkowanie zewnętrzne (ang. external linkage) oznacza, że zmienna foo2 jest zdefiniowana w innej jednostce kompilacji.
 
 ## Poprawienie kodu
 
 Jak można się domyślić, aby poprawić kod, który umieszczony jest we wstępie, wystarczy zadeklarować zmienną jako thread\_local:
+```cpp
+class MongoCoordinator {
+// ... 
+  static thread_local mongocxx::client client_;
+}
+// ... 
+thread_local mongocxx::client MongoCoordinator::client_ = {}
+```
 
-    class MongoCoordinator {
-    // ... 
-      static thread_local mongocxx::client client_;
-    }
-    // ... 
-    thread_local mongocxx::client MongoCoordinator::client_ = {}
-
-Zamiast dodować zbędne mutexy wystarczyło zmienić klienta do bazy danych na membera typu thread\_local - i rozwiązało to problemy synchronizacyjne. 
+Zamiast dodawać zbędne mutexy wystarczyło zmienić klienta do bazy danych na membera typu thread\_local - i rozwiązało to problemy synchronizacyjne. 
 
 ## Podsumowanie
 
-Język C++ posiada bardzo wiele funkcjonalności, z których na co dzień się nie używa. Jedną z nich jest thread\_local, które może być bardzo przydatne 
+Język C++ posiada bardzo wiele funkcjonalności, których na co dzień się nie używa. Jedną z nich jest thread\_local, które może być bardzo przydatne 
 w aplikacjach wielowątkowych. Zamiast synchronizować zmienną statyczną, możemy użyć zmiennej thread\_local i żadna synchronizacja nie będzie potrzebna. 
 
